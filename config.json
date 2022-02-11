@@ -1,7 +1,7 @@
 {
-    "indir": "/home/pasha/Documents/rust/words_counting/data/mnt/1/0",
+    "indir": "/home/pasha/Documents/rust/words_counting/data/mnt/1/0/0",
     "out_by_a": "results/by_a.txt",
     "out_by_n": "results/by_n.txt",
-    "index_threads": 1,
+    "index_threads": 8,
     "max_q_size": 1000
 }
