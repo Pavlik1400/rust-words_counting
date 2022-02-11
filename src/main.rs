@@ -24,13 +24,10 @@ fn main() {
     let count_result = count_words(&config);
 
     let start_time = time::Instant::now();
-    dump_res(&config, &count_result);
-
     println!(
-        "Total: {}ms\nReading: {}ms\nIndexing: {}ms\nSaving: {}ms",
-        count_result.total_time,
-        count_result.reading_time_ms,
-        count_result.indexing_time_ms,
-        start_time.elapsed().as_millis()
+        "Total: {}ms\nReading: {}ms\nIndexing: {}ms",
+        count_result.total_time, count_result.reading_time_ms, count_result.indexing_time_ms,
     );
+    dump_res(&config, count_result);
+    println!("Saving: {}ms", start_time.elapsed().as_millis());
 }
