@@ -17,5 +17,5 @@ fn main() {
     }
 
     let config = WCConfig::new(config_name);
-    count_words(&config);
+    let _counted_words = count_words(&config);
 }

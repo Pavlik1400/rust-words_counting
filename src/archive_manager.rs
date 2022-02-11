@@ -1,7 +1,7 @@
 use libarchive3_sys::ffi::{
-    archive_entry_clear, archive_entry_free, archive_entry_pathname, archive_entry_size,
+    archive_entry_clear, archive_entry_pathname, archive_entry_size,
     archive_read_data, archive_read_free, archive_read_new, archive_read_next_header,
-    archive_read_open_memory, archive_read_support_filter_all, archive_read_support_format_all,
+    archive_read_open_memory, archive_read_support_filter_all, archive_read_support_format_all, //archive_entry_free
 };
 use libarchive3_sys::ffi::{Struct_archive, Struct_archive_entry};
 use libarchive3_sys::ffi::{ARCHIVE_EOF, ARCHIVE_OK, ARCHIVE_WARN};
@@ -107,10 +107,10 @@ impl ArchiveManager {
     }
 }
 
-impl Drop for ArchiveManager {
-    fn drop(&mut self) {
-        unsafe {
-            archive_entry_free(self.entry);
-        }
-    }
-}
+// impl Drop for ArchiveManager {
+//     fn drop(&mut self) {
+//         unsafe {
+//             // archive_entry_free(self.entry);
+//         }
+//     }
+// }
