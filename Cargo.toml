@@ -2,6 +2,10 @@
 name = "words_counting"
 version = "0.1.0"
 edition = "2021"
+build = "src/build.rs"
+
+[build-dependencies]
+regex = "1.0"
 
 [dependencies]
 argparse = "0.2.2"
@@ -12,3 +16,5 @@ lazy_static = "1.4.0"
 crossbeam = "0.8.1"
 libarchive3-sys = "0.1.2"
 libc = "0.2"
+unicode-normalization = "0.1.19"
+unicode-segmentation = "1.9.0"

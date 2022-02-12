@@ -1,5 +1,6 @@
 pub mod archive_manager;
 pub mod wc_config;
+pub mod casefold;
 
 use archive_manager::ArchiveManager;
 use lazy_static::lazy_static;
@@ -13,6 +14,10 @@ use std::{
 };
 use walkdir::WalkDir;
 use wc_config::WCConfig;
+use casefold::default_case_fold_str;
+// use unicode_normalization::UnicodeNormalization;
+use unicode_segmentation::UnicodeSegmentation;
+
 
 lazy_static! {
     pub static ref ARCH_EXT: Vec<&'static str> = vec!["zip", "tar", "gz", "tar.gz", "7z"];
@@ -72,7 +77,7 @@ fn read_files_recur(path: &String, queue: &IndexQueue, read_time_mut: Arc<Mutex<
     *read_time += start_time.elapsed().as_millis();
 }
 
-fn count_words_in_file(content: Vec<u8>) -> HashMap<String, usize> {
+fn _count_words_in_file(content: Vec<u8>) -> HashMap<String, usize> {
     let mut counter: HashMap<String, usize> = HashMap::new();
     let str_content: String;
     match String::from_utf8(content) {
@@ -88,6 +93,35 @@ fn count_words_in_file(content: Vec<u8>) -> HashMap<String, usize> {
             }
         }
     }
+    counter
+}
+
+fn count_words_in_file_unicode(content: Vec<u8>) -> HashMap<String, usize> {
+    let mut counter: HashMap<String, usize> = HashMap::new();
+    let str_content: String;
+    match String::from_utf8(content) {
+        Ok(s) => str_content = s,
+        Err(err) => {
+            eprintln!("Unicode error: {}", err);
+            return counter;
+        },
+    }
+    // normalizing - no need since default_case_fold_str normalizes
+    // let str_content = str_content.nfc().collect::<String>();
+
+    // case fold
+    let str_content = default_case_fold_str(&str_content);
+
+    // segment by words
+    for word in str_content.unicode_words() {
+        match counter.get_mut(word) {
+            Some(counter) => *counter += 1,
+            None => {
+                counter.insert(String::from(word), 1);
+            }
+        }
+    }
+
     counter
 }
 
@@ -119,7 +153,7 @@ fn one_thread_count(
                             }
                             match archive_manager.get_next() {
                                 Ok(content) => merge_channel
-                                    .send(WordCounter::Counter(count_words_in_file(content)))
+                                    .send(WordCounter::Counter(count_words_in_file_unicode(content)))
                                     .unwrap(),
                                 Err(err) => eprintln!("ArchiveManager: error in get_next: {}", err),
                             }
@@ -132,7 +166,7 @@ fn one_thread_count(
                 }
             }
             MyFile::Regular(_, content) => merge_channel
-                .send(WordCounter::Counter(count_words_in_file(content)))
+                .send(WordCounter::Counter(count_words_in_file_unicode(content)))
                 .unwrap(),
             MyFile::Poisoned => {
                 index_queue.push(MyFile::Poisoned);
@@ -199,7 +233,8 @@ pub fn count_words(config: &WCConfig) -> CountResult {
 
     let total_time = start_time.elapsed().as_millis();
     let reading_time_ms = *reading_time_ms.lock().unwrap();
-    let indexing_time_ms = *indexing_time_ms.lock().unwrap();
+    let indexing_time_ms = (*indexing_time_ms.lock().unwrap() as f64 / config.index_threads as f64) as u128;
+
     CountResult {
         reading_time_ms,
         indexing_time_ms,
@@ -213,7 +248,7 @@ pub fn dump_res(config: &WCConfig, count_result: CountResult) {
     let mut counted_words: Vec<(String, usize)> = count_result.counted_words.into_iter().collect();
     let mut by_n_file = File::create(&config.out_by_n).unwrap();
 
-    counted_words.sort_by(|a, b| a.1.cmp(&b.1));
+    counted_words.sort_by(|a, b| b.1.cmp(&a.1));
     for (word, n) in &counted_words {
         write!(&mut by_n_file, "{} : {}\n", word, n).unwrap();
     }
