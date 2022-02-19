@@ -1,23 +1,22 @@
 pub mod archive_manager;
-pub mod wc_config;
 pub mod casefold;
+pub mod wc_config;
 
 use archive_manager::ArchiveManager;
+use casefold::default_case_fold_str;
+use chashmap::CHashMap;
 use lazy_static::lazy_static;
-use std::sync::mpsc::{self, Receiver};
 use std::{
-    collections::HashMap,
     fs::{self, File},
     io::Write,
-    sync::{mpsc::Sender, Arc, Mutex},
+    sync::{Arc, Mutex},
     thread, time,
 };
+use unicode_segmentation::UnicodeSegmentation;
 use walkdir::WalkDir;
 use wc_config::WCConfig;
-use casefold::default_case_fold_str;
-// use unicode_normalization::UnicodeNormalization;
-use unicode_segmentation::UnicodeSegmentation;
 
+type IndexQueue = crossbeam::queue::SegQueue<MyFile>;
 
 lazy_static! {
     pub static ref ARCH_EXT: Vec<&'static str> = vec!["zip", "tar", "gz", "tar.gz", "7z"];
@@ -31,21 +30,12 @@ enum MyFile {
     Poisoned,
 }
 
-enum WordCounter {
-    Counter(HashMap<String, usize>),
-    Poisoned,
-}
-
 pub struct CountResult {
     pub reading_time_ms: u128,
     pub indexing_time_ms: u128,
     pub total_time: u128,
-    pub counted_words: HashMap<String, usize>,
+    pub counted_words: Arc<CHashMap<String, usize>>,
 }
-
-type IndexQueue = crossbeam::queue::SegQueue<MyFile>;
-// type IndexQueue = crossbeam::queue::ArrayQueue<MyFile>;
-// type MergeQueue = crossbeam::queue::SegQueue<HashMap<String, usize>>;
 
 fn read_files_recur(path: &String, queue: &IndexQueue, read_time_mut: Arc<Mutex<u128>>) {
     let start_time = time::Instant::now();
@@ -77,57 +67,27 @@ fn read_files_recur(path: &String, queue: &IndexQueue, read_time_mut: Arc<Mutex<
     *read_time += start_time.elapsed().as_millis();
 }
 
-fn _count_words_in_file(content: Vec<u8>) -> HashMap<String, usize> {
-    let mut counter: HashMap<String, usize> = HashMap::new();
+fn count_words_in_file_unicode(content: Vec<u8>, counter: &CHashMap<String, usize>) {
     let str_content: String;
     match String::from_utf8(content) {
         Ok(s) => str_content = s,
-        Err(_) => return counter,
+        Err(_) => return
     }
-    // let str_content = unsafe {String::from_utf8_unchecked(content)};
-    for word in str_content.split_whitespace() {
-        match counter.get_mut(word) {
-            Some(counter) => *counter += 1,
-            None => {
-                counter.insert(String::from(word), 1);
-            }
-        }
-    }
-    counter
-}
-
-fn count_words_in_file_unicode(content: Vec<u8>) -> HashMap<String, usize> {
-    let mut counter: HashMap<String, usize> = HashMap::new();
-    let str_content: String;
-    match String::from_utf8(content) {
-        Ok(s) => str_content = s,
-        Err(err) => {
-            eprintln!("Unicode error: {}", err);
-            return counter;
-        },
-    }
-    // normalizing - no need since default_case_fold_str normalizes
     // let str_content = str_content.nfc().collect::<String>();
-
-    // case fold
     let str_content = default_case_fold_str(&str_content);
-
-    // segment by words
     for word in str_content.unicode_words() {
         match counter.get_mut(word) {
-            Some(counter) => *counter += 1,
+            Some(mut counter) => *counter += 1,
             None => {
                 counter.insert(String::from(word), 1);
             }
         }
     }
-
-    counter
 }
 
 fn one_thread_count(
     index_queue: &IndexQueue,
-    merge_channel: Sender<WordCounter>,
+    counter: &CHashMap<String, usize>,
     index_time_mut: Arc<Mutex<u128>>,
 ) {
     let start_time = time::Instant::now();
@@ -152,9 +112,7 @@ fn one_thread_count(
                                 break;
                             }
                             match archive_manager.get_next() {
-                                Ok(content) => merge_channel
-                                    .send(WordCounter::Counter(count_words_in_file_unicode(content)))
-                                    .unwrap(),
+                                Ok(content) => count_words_in_file_unicode(content, counter),
                                 Err(err) => eprintln!("ArchiveManager: error in get_next: {}", err),
                             }
                         }
@@ -165,12 +123,9 @@ fn one_thread_count(
                     }
                 }
             }
-            MyFile::Regular(_, content) => merge_channel
-                .send(WordCounter::Counter(count_words_in_file_unicode(content)))
-                .unwrap(),
+            MyFile::Regular(_, content) => count_words_in_file_unicode(content, counter),
             MyFile::Poisoned => {
                 index_queue.push(MyFile::Poisoned);
-                merge_channel.send(WordCounter::Poisoned).unwrap();
                 break;
             }
         }
@@ -179,53 +134,38 @@ fn one_thread_count(
     *index_time += start_time.elapsed().as_millis();
 }
 
-fn merge_counters(rx_merge: Receiver<WordCounter>, n_threads: u32) -> HashMap<String, usize> {
-    let mut result: HashMap<String, usize> = HashMap::new();
-    let mut processed_counters = 0;
-
-    while processed_counters != n_threads {
-        match rx_merge.recv().unwrap() {
-            WordCounter::Counter(w_counter) => {
-                for (word, n) in w_counter {
-                    let count = result.entry(word).or_insert(0);
-                    *count += n;
-                }
-            }
-            WordCounter::Poisoned => processed_counters += 1,
-        }
-    }
-    result
-}
-
 pub fn count_words(config: &WCConfig) -> CountResult {
     let index_queue = Arc::new(IndexQueue::new());
-    // let merge_queue = Arc::new(MergeQueue::new());
-    let (tx_merge, rx_merge) = mpsc::channel();
-
+    let counter = Arc::new(CHashMap::new());
     let reading_time_ms: Arc<Mutex<u128>> = Arc::new(Mutex::new(0));
     let indexing_time_ms: Arc<Mutex<u128>> = Arc::new(Mutex::new(0));
-
     let start_time = time::Instant::now();
 
-    let reader_queue = Arc::clone(&index_queue);
-    let indir = config.indir.clone();
+    // start reading thread
+    let cloned_reader_queue = Arc::clone(&index_queue);
+    let cloned_indir = config.indir.clone();
     let cloned_reading_time_ms = Arc::clone(&reading_time_ms);
     let reader_handle = thread::spawn(move || {
-        read_files_recur(&indir, &reader_queue, cloned_reading_time_ms);
+        read_files_recur(&cloned_indir, &cloned_reader_queue, cloned_reading_time_ms);
     });
 
+    // start indexing threads
     let mut index_handlers = Vec::new();
     for _ in 0..config.index_threads {
-        let cur_index_queue = Arc::clone(&index_queue);
-        let tx_merge_clone = tx_merge.clone();
+        let cloned_index_queue = Arc::clone(&index_queue);
         let cloned_indexing_time_ms = Arc::clone(&indexing_time_ms);
+        let cloned_counter = Arc::clone(&counter);
         let index_handler = thread::spawn(move || {
-            one_thread_count(&cur_index_queue, tx_merge_clone, cloned_indexing_time_ms);
+            one_thread_count(
+                &cloned_index_queue,
+                &cloned_counter,
+                cloned_indexing_time_ms,
+            );
         });
         index_handlers.push(index_handler);
     }
 
-    let counted_words = merge_counters(rx_merge, config.index_threads);
+    // join all threads
     reader_handle.join().unwrap();
     while let Some(handler) = index_handlers.pop() {
         handler.join().unwrap();
@@ -233,19 +173,21 @@ pub fn count_words(config: &WCConfig) -> CountResult {
 
     let total_time = start_time.elapsed().as_millis();
     let reading_time_ms = *reading_time_ms.lock().unwrap();
-    let indexing_time_ms = (*indexing_time_ms.lock().unwrap() as f64 / config.index_threads as f64) as u128;
+    let indexing_time_ms =
+        (*indexing_time_ms.lock().unwrap() as f64 / config.index_threads as f64) as u128;
 
     CountResult {
         reading_time_ms,
         indexing_time_ms,
         total_time,
-        counted_words,
+        counted_words: Arc::clone(&counter),
     }
 }
 
 pub fn dump_res(config: &WCConfig, count_result: CountResult) {
     // let mut counted_words = Vec::from_iter(count_result.counted_words.iter());
-    let mut counted_words: Vec<(String, usize)> = count_result.counted_words.into_iter().collect();
+    let counted_words = count_result.counted_words.as_ref().clone();
+    let mut counted_words: Vec<(String, usize)> = Vec::from_iter(counted_words.into_iter());
     let mut by_n_file = File::create(&config.out_by_n).unwrap();
 
     counted_words.sort_by(|a, b| b.1.cmp(&a.1));
